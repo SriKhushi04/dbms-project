@@ -1,0 +1,26 @@
+{
+  "name": "hostelhub-backend",
+  "version": "1.0.0",
+  "description": "HostelHub - University Hostel Allocation Backend (Node.js/Express/MySQL)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "init-db": "node ../database/initDb.js",
+    "reset-db": "node ../database/initDb.js --force-reset",
+    "test": "node --test tests/allocationAlgorithm.test.js",
+    "test:all": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.12.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
