@@ -149,3 +149,4 @@ test('HostelHub Minimal Student Workflow & Invariants', async (t) => {
     assert.equal(student2State.showForm, true, 'Form must be shown when unallocated');
   });
 });
+
