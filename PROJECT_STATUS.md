@@ -119,3 +119,4 @@ The Phase 1 core hostel allocation system is 100% complete. The following featur
 | **Frontend** | Complete Student Portal (4 pages) & Admin Console (5 pages) | Maintenance ticketing UI, Student Fee portal, Mess menu |
 | **Security** | Bcrypt hashing, JWT $\ge 32$ chars, RBAC, Parameterized SQL | Two-factor authentication (2FA), OAuth SSO |
 | **Testing** | 13/13 Unit tests, live API health, production build check | End-to-end Cypress/Playwright browser automation |
+
