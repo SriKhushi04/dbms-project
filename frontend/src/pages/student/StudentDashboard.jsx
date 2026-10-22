@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
 import {
   CheckCircle2,
@@ -10,7 +10,8 @@ import {
   AlertCircle,
   Clock,
   Sparkles,
-  Edit3
+  Edit3,
+  Home
 } from 'lucide-react';
 
 export default function StudentDashboard() {
@@ -26,6 +27,7 @@ export default function StudentDashboard() {
   const [selectedBlock, setSelectedBlock] = useState('');
   const [selectedCapacity, setSelectedCapacity] = useState('1');
   const [roommates, setRoommates] = useState([]);
+  const [roommateErrors, setRoommateErrors] = useState({});
   const [preferences, setPreferences] = useState(['', '', '', '', '']);
 
   // Available rooms for selected block + capacity
@@ -45,7 +47,7 @@ export default function StudentDashboard() {
   useEffect(() => {
     const savedStudentStr = localStorage.getItem('hostelhub_student');
     if (!savedStudentStr) {
-      navigate('/login');
+      navigate('/allocation/login');
       return;
     }
     const currentStudent = JSON.parse(savedStudentStr);
@@ -98,6 +100,7 @@ export default function StudentDashboard() {
       // Reset roommate input slots according to capacity
       const requiredRoommates = parseInt(selectedCapacity, 10) - 1;
       setRoommates(new Array(requiredRoommates).fill(''));
+      setRoommateErrors({});
       setPreferences(['', '', '', '', '']);
     }
   }, [selectedBlock, selectedCapacity, allocation, isEditing]);
@@ -118,13 +121,83 @@ export default function StudentDashboard() {
 
   const handleLogout = () => {
     localStorage.removeItem('hostelhub_student');
-    navigate('/login');
+    navigate('/allocation/login');
   };
 
   const handleRoommateChange = (index, value) => {
     const updated = [...roommates];
     updated[index] = value.toUpperCase();
     setRoommates(updated);
+    if (roommateErrors[index]) {
+      setRoommateErrors(prev => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+    }
+  };
+
+  const validateRoommateField = async (index) => {
+    const raw = roommates[index];
+    if (!raw || !raw.trim()) {
+      setRoommateErrors(prev => ({
+        ...prev,
+        [index]: `Roommate ${index + 1} registration number cannot be empty.`
+      }));
+      return false;
+    }
+
+    const clean = raw.trim().toUpperCase();
+    if (student && clean === student.registration_number.toUpperCase()) {
+      setRoommateErrors(prev => ({
+        ...prev,
+        [index]: 'You cannot enter your own registration number as a roommate.'
+      }));
+      return false;
+    }
+
+    const isDuplicate = roommates.some((r, i) => i !== index && r && r.trim().toUpperCase() === clean);
+    if (isDuplicate) {
+      setRoommateErrors(prev => ({
+        ...prev,
+        [index]: `Duplicate roommate registration number "${clean}" is not allowed.`
+      }));
+      return false;
+    }
+
+    try {
+      const res = await axios.get(
+        `/api/students/validate-roommate?regNo=${encodeURIComponent(clean)}&currentRegNo=${encodeURIComponent(student?.registration_number || '')}`
+      );
+      if (res.data.valid) {
+        setRoommateErrors(prev => {
+          const next = { ...prev };
+          delete next[index];
+          return next;
+        });
+        return true;
+      }
+    } catch (err) {
+      const msg = err.response?.data?.message || 'Invalid roommate registration number.';
+      setRoommateErrors(prev => ({
+        ...prev,
+        [index]: msg
+      }));
+      return false;
+    }
+  };
+
+  const handleStartEditing = () => {
+    setIsEditing(true);
+    if (savedData) {
+      setSelectedBlock(savedData.block_name);
+      setSelectedCapacity(savedData.capacity.toString());
+      if (savedData.roommates && savedData.roommates.length > 0) {
+        setRoommates([...savedData.roommates]);
+      }
+    }
+    setPreferences(['', '', '', '', '']);
+    fetchRooms(savedData?.block_name || selectedBlock, savedData?.capacity?.toString() || selectedCapacity);
   };
 
   const handlePreferenceChange = (prefIndex, roomId) => {
@@ -139,39 +212,55 @@ export default function StudentDashboard() {
     setError('');
     setSuccess('');
 
-    // Check all 5 preferences selected
-    const chosenRoomIds = preferences.filter(Boolean);
-    if (chosenRoomIds.length !== 5) {
-      setError('Please select all five (5) distinct room preferences.');
+    // Check available rooms count
+    const numRequired = Math.min(5, availableRooms.length);
+    if (numRequired === 0) {
+      setError('No rooms are currently available in this block for the selected capacity.');
+      return;
+    }
+
+    // Check all required preferences selected
+    const chosenRoomIds = preferences.slice(0, numRequired).filter(Boolean);
+    if (chosenRoomIds.length !== numRequired) {
+      setError(`Please select all ${numRequired} distinct room preference(s) from remaining available rooms.`);
       return;
     }
 
     // Check distinct rooms
     const distinctRooms = new Set(chosenRoomIds);
-    if (distinctRooms.size !== 5) {
-      setError('All five preferences must be distinct rooms.');
+    if (distinctRooms.size !== numRequired) {
+      setError(`All ${numRequired} room preferences must be distinct.`);
       return;
     }
 
     // Check roommates based on capacity
     const requiredRoommates = parseInt(selectedCapacity, 10) - 1;
-    const cleanRoommates = roommates.map(r => r.trim().toUpperCase()).filter(Boolean);
+    const errors = {};
 
-    if (cleanRoommates.length !== requiredRoommates) {
-      setError(`For a ${selectedCapacity}-bedded room, please enter exactly ${requiredRoommates} roommate registration number(s).`);
+    for (let i = 0; i < requiredRoommates; i++) {
+      const val = roommates[i];
+      if (!val || !val.trim()) {
+        errors[i] = `Roommate ${i + 1} registration number cannot be empty or contain only whitespace.`;
+      } else {
+        const clean = val.trim().toUpperCase();
+        if (student && clean === student.registration_number.toUpperCase()) {
+          errors[i] = 'You cannot enter your own registration number as a roommate.';
+        } else {
+          const isDup = roommates.some((r, j) => j !== i && r && r.trim().toUpperCase() === clean);
+          if (isDup) {
+            errors[i] = `Duplicate roommate registration number "${clean}" is not allowed.`;
+          }
+        }
+      }
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setRoommateErrors(errors);
+      setError('Please resolve all roommate registration errors before submitting.');
       return;
     }
 
-    if (cleanRoommates.includes(student.registration_number)) {
-      setError('You cannot enter your own registration number as a roommate.');
-      return;
-    }
-
-    const uniqueRoommates = new Set(cleanRoommates);
-    if (uniqueRoommates.size !== cleanRoommates.length) {
-      setError('Duplicate roommate registration numbers are not allowed.');
-      return;
-    }
+    const cleanRoommates = roommates.slice(0, requiredRoommates).map(r => r.trim().toUpperCase());
 
     setSubmitting(true);
     try {
@@ -184,11 +273,19 @@ export default function StudentDashboard() {
 
       if (res.data.success) {
         setSuccess('Preferences and roommate details saved successfully to MySQL!');
+        setRoommateErrors({});
         // Reload dashboard to show saved state
         await loadDashboard(student.registration_number);
       }
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to submit preferences. Please check your inputs.');
+      const msg = err.response?.data?.message || 'Failed to submit preferences. Please check your inputs.';
+      setError(msg);
+      if (err.response?.data?.fieldIndex !== undefined) {
+        setRoommateErrors(prev => ({
+          ...prev,
+          [err.response.data.fieldIndex]: msg
+        }));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -209,7 +306,7 @@ export default function StudentDashboard() {
         <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-sm">
-              <Building2 className="w-5 h-5" />
+              <Building2 className="w-5 h-5" aria-hidden="true" />
             </div>
             <div>
               <h1 className="text-lg font-black text-slate-900 tracking-tight leading-none">HostelHub</h1>
@@ -218,6 +315,15 @@ export default function StudentDashboard() {
           </div>
 
           <div className="flex items-center gap-4">
+            <Link
+              to="/"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-slate-600 hover:text-indigo-600 hover:bg-slate-100 rounded-lg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+              aria-label="Return to HostelHub Home Page"
+            >
+              <Home className="w-3.5 h-3.5 text-slate-500" aria-hidden="true" />
+              <span>Home</span>
+            </Link>
+
             <div className="text-right text-xs">
               <span className="font-bold text-slate-900 block">{student?.full_name}</span>
               <span className="text-slate-500 font-mono">
@@ -227,10 +333,11 @@ export default function StudentDashboard() {
 
             <button
               onClick={handleLogout}
-              className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+              className="p-2 text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
               title="Sign Out"
+              aria-label="Sign out of student account"
             >
-              <LogOut className="w-5 h-5" />
+              <LogOut className="w-5 h-5" aria-hidden="true" />
             </button>
           </div>
         </div>
@@ -267,24 +374,41 @@ export default function StudentDashboard() {
           <div className="space-y-6">
             {/* If preferences already submitted and not currently editing */}
             {savedData && !isEditing ? (
-              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
-                <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-                  <div className="flex items-center gap-2 text-emerald-700 font-bold text-sm">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                    <span>Preferences Submitted & Saved in MySQL</span>
+              <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
+                {(savedData.status === 'UNALLOCATED' || savedData.status === 'WAITLISTED') ? (
+                  <div className="p-5 bg-amber-50 border-2 border-amber-300 rounded-2xl flex items-start gap-3.5 text-amber-950 shadow-sm">
+                    <AlertCircle className="w-5 h-5 flex-shrink-0 text-amber-600 mt-0.5" />
+                    <div className="flex-1">
+                      <h3 className="font-black text-sm text-amber-900 leading-snug">
+                        Room not available. Please select your preferences again from the remaining available rooms.
+                      </h3>
+                      <p className="text-xs text-amber-700 mt-1 leading-relaxed">
+                        All previously selected rooms were assigned to higher-merit groups. Your registered roommate group is preserved. Please pick new room preferences from the currently vacant rooms for the next round.
+                      </p>
+                      <button
+                        onClick={handleStartEditing}
+                        className="mt-3.5 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shadow-md shadow-amber-200 transition-all flex items-center gap-1.5"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Resubmit Room Preferences &rarr;</span>
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => {
-                      setIsEditing(true);
-                      setSelectedBlock(savedData.block_name);
-                      setSelectedCapacity(savedData.capacity.toString());
-                    }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all"
-                  >
-                    <Edit3 className="w-3.5 h-3.5" />
-                    <span>Edit Choices</span>
-                  </button>
-                </div>
+                ) : (
+                  <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                    <div className="flex items-center gap-2 text-emerald-700 font-bold text-sm">
+                      <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                      <span>Preferences Submitted & Saved in MySQL</span>
+                    </div>
+                    <button
+                      onClick={handleStartEditing}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-all"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>Edit Choices</span>
+                    </button>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mt-4 text-xs">
                   <div>
@@ -339,15 +463,23 @@ export default function StudentDashboard() {
                 </div>
 
                 {error && (
-                  <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 text-xs text-red-700">
-                    <AlertCircle className="w-5 h-5 flex-shrink-0 text-red-500" />
+                  <div
+                    role="alert"
+                    aria-live="polite"
+                    className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl flex items-center gap-3 text-xs text-red-700"
+                  >
+                    <AlertCircle className="w-5 h-5 flex-shrink-0 text-red-500" aria-hidden="true" />
                     <span>{error}</span>
                   </div>
                 )}
 
                 {success && (
-                  <div className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3 text-xs text-emerald-700">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0 text-emerald-500" />
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3 text-xs text-emerald-700"
+                  >
+                    <CheckCircle2 className="w-5 h-5 flex-shrink-0 text-emerald-500" aria-hidden="true" />
                     <span>{success}</span>
                   </div>
                 )}
@@ -356,13 +488,14 @@ export default function StudentDashboard() {
                   {/* Step 1: Block & Capacity Dropdowns */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      <label htmlFor="hostel-block-select" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
                         1. Hostel Block
                       </label>
                       <select
+                        id="hostel-block-select"
                         value={selectedBlock}
                         onChange={(e) => setSelectedBlock(e.target.value)}
-                        className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                        className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:bg-white"
                       >
                         {hostels.map(h => (
                           <option key={h.id} value={h.block_name}>
@@ -373,13 +506,14 @@ export default function StudentDashboard() {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
+                      <label htmlFor="room-capacity-select" className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
                         2. Room Capacity
                       </label>
                       <select
+                        id="room-capacity-select"
                         value={selectedCapacity}
                         onChange={(e) => setSelectedCapacity(e.target.value)}
-                        className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:bg-white"
+                        className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500 focus:bg-white"
                       >
                         <option value="1">1 Bed (Single Room)</option>
                         <option value="2">2 Beds (Double Room)</option>
@@ -391,7 +525,7 @@ export default function StudentDashboard() {
                   {/* Step 2: Roommate Registration Numbers */}
                   <div className="p-4 bg-slate-50/70 border border-slate-200 rounded-xl space-y-3">
                     <div className="flex items-center gap-2 text-xs font-bold text-slate-700 uppercase tracking-wider">
-                      <Users className="w-4 h-4 text-indigo-600" />
+                      <Users className="w-4 h-4 text-indigo-600" aria-hidden="true" />
                       <span>Roommate Registration Numbers</span>
                     </div>
 
@@ -403,16 +537,26 @@ export default function StudentDashboard() {
 
                     {selectedCapacity === '2' && (
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">
+                        <label htmlFor="roommate-input-0" className="block text-xs font-semibold text-slate-600 mb-1">
                           Roommate 1 Registration Number (You are occupant 1):
                         </label>
                         <input
+                          id="roommate-input-0"
                           type="text"
                           value={roommates[0] || ''}
                           onChange={(e) => handleRoommateChange(0, e.target.value)}
+                          onBlur={() => validateRoommateField(0)}
                           placeholder="e.g. 24BCE1003"
-                          className="w-full sm:w-64 px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          className={`w-full sm:w-72 px-3 py-2 bg-white border ${
+                            roommateErrors[0] ? 'border-red-500 ring-1 ring-red-400 bg-red-50/20' : 'border-slate-300'
+                          } rounded-lg text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500`}
                         />
+                        {roommateErrors[0] && (
+                          <p role="alert" className="mt-1.5 text-xs text-red-600 font-semibold flex items-center gap-1.5">
+                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 text-red-500" aria-hidden="true" />
+                            <span>{roommateErrors[0]}</span>
+                          </p>
+                        )}
                       </div>
                     )}
 
@@ -420,67 +564,84 @@ export default function StudentDashboard() {
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         {[0, 1, 2].map((idx) => (
                           <div key={idx}>
-                            <label className="block text-xs font-semibold text-slate-600 mb-1">
+                            <label htmlFor={`roommate-input-${idx}`} className="block text-xs font-semibold text-slate-600 mb-1">
                               Roommate {idx + 1} Registration No:
                             </label>
                             <input
+                              id={`roommate-input-${idx}`}
                               type="text"
                               value={roommates[idx] || ''}
                               onChange={(e) => handleRoommateChange(idx, e.target.value)}
+                              onBlur={() => validateRoommateField(idx)}
                               placeholder={`e.g. 24BCE100${idx + 3}`}
-                              className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                              className={`w-full px-3 py-2 bg-white border ${
+                                roommateErrors[idx] ? 'border-red-500 ring-1 ring-red-400 bg-red-50/20' : 'border-slate-300'
+                              } rounded-lg text-sm font-mono uppercase focus:outline-none focus:ring-2 focus:ring-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500`}
                             />
+                            {roommateErrors[idx] && (
+                              <p role="alert" className="mt-1.5 text-xs text-red-600 font-semibold flex items-center gap-1.5">
+                                <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 text-red-500" aria-hidden="true" />
+                                <span>{roommateErrors[idx]}</span>
+                              </p>
+                            )}
                           </div>
                         ))}
                       </div>
                     )}
                   </div>
 
-                  {/* Step 3: Five Room Preferences (Mutual Exclusion) */}
+                  {/* Step 3: Room Preferences (Mutual Exclusion) */}
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
                       <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
-                        <ListOrdered className="w-4 h-4 text-indigo-600" />
-                        <span>Rank Exactly 5 Room Preferences ({selectedBlock} • {selectedCapacity}-Bed)</span>
+                        <ListOrdered className="w-4 h-4 text-indigo-600" aria-hidden="true" />
+                        <span>
+                          Rank Preferences ({selectedBlock} • {selectedCapacity}-Bed &bull; {Math.min(5, availableRooms.length)} Choices)
+                        </span>
                       </label>
                       <span className="text-[11px] text-slate-500 font-medium">
                         {loadingRooms ? 'Loading rooms...' : `${availableRooms.length} available rooms in MySQL`}
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-2.5">
-                      {[0, 1, 2, 3, 4].map((prefIdx) => {
-                        const currentChoice = preferences[prefIdx];
+                    {availableRooms.length === 0 && !loadingRooms ? (
+                      <div role="alert" className="p-4 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-semibold flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" aria-hidden="true" />
+                        <span>No vacant rooms are currently available in {selectedBlock} for {selectedCapacity}-bedded capacity. Please select another block or room capacity.</span>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-2.5">
+                        {Array.from({ length: Math.min(5, availableRooms.length) }).map((_, prefIdx) => {
+                          const currentChoice = preferences[prefIdx];
 
-                        // CRITICAL REQUIREMENT:
-                        // Each room can appear in at most one preference dropdown.
-                        // Filter out rooms selected in other dropdowns, while keeping current selection visible!
-                        const otherSelectedRoomIds = preferences.filter((id, idx) => idx !== prefIdx && id !== '');
-                        const eligibleOptions = availableRooms.filter(
-                          r => !otherSelectedRoomIds.includes(r.id.toString())
-                        );
+                          const otherSelectedRoomIds = preferences.filter((id, idx) => idx !== prefIdx && id !== '');
+                          const eligibleOptions = availableRooms.filter(
+                            r => !otherSelectedRoomIds.includes(r.id.toString())
+                          );
 
-                        return (
-                          <div key={prefIdx} className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
-                            <span className="w-24 text-xs font-bold text-slate-500 pl-2">
-                              Preference {prefIdx + 1}:
-                            </span>
-                            <select
-                              value={currentChoice}
-                              onChange={(e) => handlePreferenceChange(prefIdx, e.target.value)}
-                              className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                            >
-                              <option value="">-- Choose a room --</option>
-                              {eligibleOptions.map(r => (
-                                <option key={r.id} value={r.id.toString()}>
-                                  Room {r.room_number} ({r.block_name} • {r.capacity} Bed)
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-                        );
-                      })}
-                    </div>
+                          return (
+                            <div key={prefIdx} className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                              <label htmlFor={`preference-select-${prefIdx}`} className="w-28 text-xs font-bold text-slate-600 pl-2 cursor-pointer">
+                                Preference {prefIdx + 1}:
+                              </label>
+                              <select
+                                id={`preference-select-${prefIdx}`}
+                                value={currentChoice || ''}
+                                onChange={(e) => handlePreferenceChange(prefIdx, e.target.value)}
+                                className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus-visible:ring-2 focus-visible:ring-indigo-500 font-mono"
+                              >
+                                <option value="">-- Choose a room --</option>
+                                {eligibleOptions.map(r => (
+                                  <option key={r.id} value={r.id.toString()}>
+                                    Room {r.room_number} ({r.block_name} • {r.capacity} Bed)
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {/* Submit Button */}
@@ -489,15 +650,15 @@ export default function StudentDashboard() {
                       <button
                         type="button"
                         onClick={() => setIsEditing(false)}
-                        className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-bold transition-all"
+                        className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-bold transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
                       >
                         Cancel Edit
                       </button>
                     )}
                     <button
                       type="submit"
-                      disabled={submitting}
-                      className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold shadow-md shadow-indigo-100 transition-all disabled:opacity-50"
+                      disabled={submitting || (availableRooms.length === 0 && !loadingRooms)}
+                      className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold shadow-md shadow-indigo-100 transition-all disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-indigo-600"
                     >
                       {submitting ? 'Saving to Database...' : 'Submit Preferences'}
                     </button>
