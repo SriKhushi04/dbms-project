@@ -40,15 +40,26 @@ export default function HostelManagementPage() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  // Auth Dialog States
-  const [authMode, setAuthMode] = useState('student-login'); // 'student-login', 'student-register', 'staff-login', 'staff-setup'
+  // Auth Dialog States (Demo: Registration Numbers & Staff Roles - No Passwords)
+  const [authMode, setAuthMode] = useState('student'); // 'student' or 'staff'
   const [authRegNo, setAuthRegNo] = useState('');
-  const [authUsername, setAuthUsername] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authFullName, setAuthFullName] = useState('');
-  const [authRole, setAuthRole] = useState('WARDEN');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Auto-connect if student is already logged in via Room Allocation
+  useEffect(() => {
+    const savedStudentStr = localStorage.getItem('hostelhub_student');
+    if (savedStudentStr && !token) {
+      try {
+        const currentStudent = JSON.parse(savedStudentStr);
+        if (currentStudent && currentStudent.registration_number) {
+          handleStudentLogin(currentStudent.registration_number);
+        }
+      } catch (err) {
+        // ignore JSON parse error
+      }
+    }
+  }, []);
 
   // Feature 1: Maintenance State
   const [complaints, setComplaints] = useState([]);
@@ -91,6 +102,10 @@ export default function HostelManagementPage() {
   const [gateMsg, setGateMsg] = useState({ type: '', text: '' });
   const [scanPassId, setScanPassId] = useState('');
 
+  // Feature 5: Staff & Warden Directory State
+  const [staffDirectory, setStaffDirectory] = useState([]);
+  const [staffFilterRole, setStaffFilterRole] = useState('ALL');
+
   // Initial Data Fetching
   useEffect(() => {
     if (token) {
@@ -107,6 +122,14 @@ export default function HostelManagementPage() {
     if (!token) return;
 
     try {
+      // Always pre-load staff directory for quick lookup & technician assignment
+      try {
+        const sRes = await axios.get('/api/management/staff', getAuthHeaders());
+        setStaffDirectory(sRes.data.data || []);
+      } catch (err) {
+        // non-blocking
+      }
+
       if (activeTab === 'maintenance') {
         if (isStaffMode) {
           const res = await axios.get('/api/management/complaints/admin', getAuthHeaders());
@@ -151,54 +174,43 @@ export default function HostelManagementPage() {
     }
   };
 
+    // --------------------------------------------------------------------------
+  // AUTHENTICATION HANDLERS (NO PASSWORDS - DEMO CONVENTIONS)
   // --------------------------------------------------------------------------
-  // AUTHENTICATION HANDLERS
-  // --------------------------------------------------------------------------
-  const handleAuthSubmit = async (e) => {
-    e.preventDefault();
-    setAuthError('');
+  const handleStudentLogin = async (regNo) => {
+    const clean = (regNo || authRegNo).trim().toUpperCase();
+    if (!clean) {
+      setAuthError('Please enter your registration number.');
+      return;
+    }
     setAuthLoading(true);
-
+    setAuthError('');
     try {
-      if (authMode === 'student-login') {
-        const res = await axios.post('/api/management/auth/student-login', {
-          registration_number: authRegNo.trim(),
-          password: authPassword
-        });
-        if (res.data.success) {
-          saveSession(res.data.data.token, { ...res.data.data.student, role: 'STUDENT' });
-        }
-      } else if (authMode === 'student-register') {
-        const res = await axios.post('/api/management/auth/student-register', {
-          registration_number: authRegNo.trim(),
-          password: authPassword
-        });
-        if (res.data.success) {
-          saveSession(res.data.data.token, { ...res.data.data.student, role: 'STUDENT' });
-        }
-      } else if (authMode === 'staff-login') {
-        const res = await axios.post('/api/management/auth/staff-login', {
-          username: authUsername.trim(),
-          password: authPassword
-        });
-        if (res.data.success) {
-          saveSession(res.data.data.token, res.data.data.staff);
-          setIsStaffMode(true);
-        }
-      } else if (authMode === 'staff-setup') {
-        const res = await axios.post('/api/management/auth/setup-first-staff', {
-          username: authUsername.trim(),
-          password: authPassword,
-          full_name: authFullName.trim(),
-          role: authRole
-        });
-        if (res.data.success) {
-          saveSession(res.data.data.token, res.data.data.staff);
-          setIsStaffMode(true);
-        }
+      const res = await axios.post('/api/management/auth/student-login', {
+        registration_number: clean
+      });
+      if (res.data.success) {
+        saveSession(res.data.data.token, { ...res.data.data.student, role: 'STUDENT' });
+        setIsStaffMode(false);
       }
     } catch (err) {
-      setAuthError(err.response?.data?.message || err.message || 'Authentication failed');
+      setAuthError(err.response?.data?.message || err.message || 'Student login failed');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleStaffRoleSelect = async (role) => {
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const res = await axios.post('/api/management/auth/staff-login', { role });
+      if (res.data.success) {
+        saveSession(res.data.data.token, res.data.data.staff);
+        setIsStaffMode(true);
+      }
+    } catch (err) {
+      setAuthError(err.response?.data?.message || err.message || 'Staff role selection failed');
     } finally {
       setAuthLoading(false);
     }
@@ -209,7 +221,6 @@ export default function HostelManagementPage() {
     setUserProfile(profile);
     localStorage.setItem('hostelhub_mgmt_token', newToken);
     localStorage.setItem('hostelhub_mgmt_user', JSON.stringify(profile));
-    setAuthPassword('');
   };
 
   const handleLogout = () => {
@@ -220,7 +231,7 @@ export default function HostelManagementPage() {
     setIsStaffMode(false);
   };
 
-  // --------------------------------------------------------------------------
+// --------------------------------------------------------------------------
   // FEATURE 1: MAINTENANCE HANDLERS
   // --------------------------------------------------------------------------
   const handleCreateComplaint = async (e) => {
@@ -247,19 +258,45 @@ export default function HostelManagementPage() {
   };
 
   const handleUpdateStatus = async (ticketId, nextStatus) => {
-    const notes = prompt(`Enter resolution / action notes for Ticket #${ticketId}:`);
+    let assignedStaffId = null;
+    let assignedStaffName = '';
+
+    if (nextStatus === 'IN_PROGRESS') {
+      const techList = staffDirectory.filter(s => s.role === 'TECHNICIAN' || s.role === 'HOUSEKEEPING');
+      const listPrompt = techList.length > 0
+        ? techList.map((t, i) => `${i + 1}. ${t.full_name} (${t.designation}) [${t.trade_specialization || 'GENERAL'}] - Ph: ${t.phone_number}`).join('\n')
+        : '1. Manoj Sharma (Electrician)\n2. Ramesh Patel (Electrician)\n3. Suresh Kumar (Plumber)\n4. Rajesh Kumar (Network Tech)\n5. Santosh Jadhav (Housekeeping)';
+
+      const choice = prompt(`Select technician to assign for Ticket #${ticketId}:\n\n${listPrompt}\n\nEnter number (1-${techList.length || 5}) or staff name:`, '1');
+      if (!choice) return;
+
+      const idx = parseInt(choice.trim(), 10) - 1;
+      if (!isNaN(idx) && techList[idx]) {
+        assignedStaffId = techList[idx].id;
+        assignedStaffName = techList[idx].full_name;
+      } else {
+        assignedStaffName = choice.trim();
+      }
+    }
+
+    const defaultNote = nextStatus === 'IN_PROGRESS'
+      ? 'Work assigned to technician; inspection scheduled.'
+      : 'Repairs successfully completed and verified.';
+    const notes = prompt(`Enter resolution / action notes for Ticket #${ticketId}:`, defaultNote);
     if (!notes || notes.trim().length < 5) {
       alert('Action cancelled: Resolution notes (minimum 5 characters) are required.');
       return;
     }
-    const staffName = prompt('Enter assigned staff / technician name:', 'Ramesh (Electrician)');
 
     try {
-      const res = await axios.patch(`/api/management/complaints/${ticketId}/status`, {
+      const payload = {
         status: nextStatus,
-        assigned_to: staffName,
         resolution_notes: notes
-      }, getAuthHeaders());
+      };
+      if (assignedStaffName) payload.assigned_to = assignedStaffName;
+      if (assignedStaffId) payload.assigned_staff_id = assignedStaffId;
+
+      const res = await axios.patch(`/api/management/complaints/${ticketId}/status`, payload, getAuthHeaders());
 
       if (res.data.success) {
         alert(`Ticket #${ticketId} updated to ${nextStatus}.`);
@@ -478,6 +515,18 @@ export default function HostelManagementPage() {
               <Clock className="w-4 h-4" />
               <span>Curfew &amp; Gate Pass</span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('directory')}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                activeTab === 'directory'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Users className="w-4 h-4" />
+              <span>Staff &amp; Wardens</span>
+            </button>
           </div>
 
           {/* Staff Mode Toggle */}
@@ -504,32 +553,34 @@ export default function HostelManagementPage() {
 
         {/* AUTHENTICATION PROMPT (If not logged in) */}
         {!token && (
-          <div className="max-w-md mx-auto my-8 bg-white p-7 rounded-2xl border border-slate-200 shadow-md">
-            <div className="text-center mb-5">
+          <div className="max-w-xl mx-auto my-8 bg-white p-7 rounded-2xl border border-slate-200 shadow-md">
+            <div className="text-center mb-6">
               <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center mx-auto mb-2">
-                <Lock className="w-6 h-6" />
+                <Building2 className="w-6 h-6" />
               </div>
-              <h2 className="text-lg font-bold text-slate-900">Authentication Required</h2>
+              <h2 className="text-lg font-bold text-slate-900">Hostel Management Portal</h2>
               <p className="text-xs text-slate-500 mt-1">
-                Please authenticate securely to access HostelHub management operations.
+                Demo portal access. Select your student identity or staff role below (no passwords required).
               </p>
             </div>
 
-            {/* Auth Mode Tabs */}
-            <div className="grid grid-cols-2 gap-1 bg-slate-100 p-1 rounded-xl mb-4 text-xs font-bold">
+            {/* Auth Mode Tabs: Student vs Staff */}
+            <div className="grid grid-cols-2 gap-1.5 bg-slate-100 p-1.5 rounded-xl mb-5 text-xs font-bold">
               <button
                 type="button"
-                onClick={() => { setAuthMode('student-login'); setAuthError(''); }}
-                className={`py-1.5 rounded-lg transition-colors ${authMode === 'student-login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
+                onClick={() => { setAuthMode('student'); setAuthError(''); }}
+                className={`py-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${authMode === 'student' ? 'bg-white text-indigo-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
               >
-                Student Login
+                <User className="w-4 h-4" />
+                <span>Student Portal</span>
               </button>
               <button
                 type="button"
-                onClick={() => { setAuthMode('student-register'); setAuthError(''); }}
-                className={`py-1.5 rounded-lg transition-colors ${authMode === 'student-register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'}`}
+                onClick={() => { setAuthMode('staff'); setAuthError(''); }}
+                className={`py-2 rounded-lg transition-all flex items-center justify-center gap-1.5 ${authMode === 'staff' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
               >
-                Set Password
+                <Shield className="w-4 h-4" />
+                <span>Staff Console (Demo)</span>
               </button>
             </div>
 
@@ -540,110 +591,87 @@ export default function HostelManagementPage() {
               </div>
             )}
 
-            <form onSubmit={handleAuthSubmit} className="space-y-3.5">
-              {(authMode === 'student-login' || authMode === 'student-register') && (
+            {authMode === 'student' ? (
+              <form onSubmit={(e) => { e.preventDefault(); handleStudentLogin(authRegNo); }} className="space-y-4">
                 <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
+                  <label htmlFor="mgmt-reg-input" className="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1.5">
                     Student Registration Number
                   </label>
                   <input
+                    id="mgmt-reg-input"
                     type="text"
                     required
                     value={authRegNo}
                     onChange={(e) => setAuthRegNo(e.target.value.toUpperCase())}
                     placeholder="e.g. 24BCE1001"
-                    className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl font-semibold uppercase focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="w-full px-3.5 py-2.5 text-sm bg-slate-50 border border-slate-300 rounded-xl font-mono uppercase focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 font-semibold"
                   />
+                  <p className="text-[11px] text-slate-500 mt-1">
+                    Demo access: Enter any valid registration number from university records. No password required.
+                  </p>
                 </div>
-              )}
 
-              {(authMode === 'staff-login' || authMode === 'staff-setup') && (
-                <>
-                  <div>
-                    <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
-                      Staff Username
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={authUsername}
-                      onChange={(e) => setAuthUsername(e.target.value)}
-                      placeholder="e.g. warden_kumar"
-                      className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    />
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <span className="text-[11px] font-bold text-slate-500 uppercase block mb-1.5">Quick Demo Accounts:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {[
+                      { reg: '24BCE1001', name: 'Bhavya (Allocated S-101)' },
+                      { reg: '24BCE1002', name: 'Dev (Group 4)' },
+                      { reg: '24BCE1003', name: 'Ishita' }
+                    ].map(demo => (
+                      <button
+                        key={demo.reg}
+                        type="button"
+                        onClick={() => { setAuthRegNo(demo.reg); handleStudentLogin(demo.reg); }}
+                        className="px-2.5 py-1 bg-white hover:bg-indigo-50 border border-slate-300 hover:border-indigo-300 text-slate-800 rounded-lg text-xs font-medium transition-all"
+                      >
+                        <span className="font-mono font-bold text-indigo-600">{demo.reg}</span>
+                        <span className="text-slate-400 text-[10px] ml-1">({demo.name})</span>
+                      </button>
+                    ))}
                   </div>
-                  {authMode === 'staff-setup' && (
-                    <>
-                      <div>
-                        <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
-                          Full Name
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={authFullName}
-                          onChange={(e) => setAuthFullName(e.target.value)}
-                          placeholder="Dr. Suresh Kumar"
-                          className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl font-semibold"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
-                          Staff Role
-                        </label>
-                        <select
-                          value={authRole}
-                          onChange={(e) => setAuthRole(e.target.value)}
-                          className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl font-semibold"
-                        >
-                          <option value="WARDEN">Warden (Full Oversight)</option>
-                          <option value="ACCOUNTANT">Accountant (Fees &amp; Dues)</option>
-                          <option value="MESS_SUPERVISOR">Mess Supervisor (Meals &amp; Rebates)</option>
-                          <option value="SECURITY_GUARD">Security Guard (Gate Movement)</option>
-                        </select>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
+                </div>
 
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-600 mb-1">
-                  Password (min 8 characters)
-                </label>
-                <input
-                  type="password"
-                  required
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2 text-sm bg-slate-50 border border-slate-300 rounded-xl font-semibold focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md shadow-indigo-100 transition-all disabled:opacity-50"
+                >
+                  {authLoading ? 'Connecting...' : 'Enter Student Management Portal'}
+                </button>
+              </form>
+            ) : (
+              <div className="space-y-4">
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-xl text-xs text-purple-900 font-medium">
+                  <span className="font-bold block mb-0.5">Local Demo Staff Console</span>
+                  Role-based staff simulation for academic demonstration. Click any staff role below to activate its administrative controls (no password required).
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {[
+                    { role: 'WARDEN', title: 'Chief Warden', name: 'Dr. Suresh Kumar', desc: 'Resolve complaints, approve gate passes & mess rebates' },
+                    { role: 'ACCOUNTANT', title: 'Senior Accountant', name: 'Mr. Rajiv Mehta', desc: 'Review student semester fee invoices & payment ledger' },
+                    { role: 'MESS_SUPERVISOR', title: 'Mess Supervisor', name: 'Mr. Anand Sharma', desc: 'Update 7-day meal menu & review leave rebates' },
+                    { role: 'SECURITY_GUARD', title: 'Main Gate Security', name: 'Officer Balram Singh', desc: 'Verify gate passes, log check-out & check-in movement' }
+                  ].map(staff => (
+                    <button
+                      key={staff.role}
+                      type="button"
+                      disabled={authLoading}
+                      onClick={() => handleStaffRoleSelect(staff.role)}
+                      className="p-3.5 text-left bg-slate-50 hover:bg-purple-50 hover:border-purple-300 border border-slate-200 rounded-xl transition-all group focus:outline-none focus:ring-2 focus:ring-purple-400"
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-bold text-slate-900 group-hover:text-purple-700">{staff.title}</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 bg-slate-200 group-hover:bg-purple-200 text-slate-700 rounded font-semibold">{staff.role}</span>
+                      </div>
+                      <span className="text-[11px] font-semibold text-purple-600 block">{staff.name}</span>
+                      <span className="text-[10px] text-slate-500 mt-1 block leading-tight">{staff.desc}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow transition-all disabled:opacity-50"
-              >
-                {authLoading ? 'Verifying...' : authMode.includes('register') || authMode.includes('setup') ? 'Complete Setup & Enter' : 'Sign In'}
-              </button>
-            </form>
-
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px]">
-              <button
-                onClick={() => { setAuthMode('staff-login'); setAuthError(''); }}
-                className="text-slate-500 hover:text-indigo-600 font-semibold"
-              >
-                Staff Login &rarr;
-              </button>
-              <button
-                onClick={() => { setAuthMode('staff-setup'); setAuthError(''); }}
-                className="text-slate-500 hover:text-purple-600 font-semibold"
-              >
-                Initial Staff Setup &rarr;
-              </button>
-            </div>
+            )}
           </div>
         )}
 
@@ -702,6 +730,7 @@ export default function HostelManagementPage() {
                           <th className="py-3 px-4">Category</th>
                           <th className="py-3 px-4">Room / Block</th>
                           <th className="py-3 px-4">Title &amp; Notes</th>
+                          <th className="py-3 px-4">Assigned Staff</th>
                           <th className="py-3 px-4">Status</th>
                           <th className="py-3 px-4 text-right">Actions</th>
                         </tr>
@@ -709,7 +738,7 @@ export default function HostelManagementPage() {
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                         {complaints.length === 0 ? (
                           <tr>
-                            <td colSpan="7" className="py-8 text-center text-slate-400">
+                            <td colSpan="8" className="py-8 text-center text-slate-400">
                               No maintenance tickets logged yet.
                             </td>
                           </tr>
@@ -723,6 +752,16 @@ export default function HostelManagementPage() {
                               <td className="py-3 px-4 max-w-xs truncate" title={c.description}>
                                 <span className="font-semibold">{c.title}</span>
                                 {c.resolution_notes && <p className="text-[10px] text-emerald-600 mt-0.5">&bull; {c.resolution_notes}</p>}
+                              </td>
+                              <td className="py-3 px-4">
+                                {c.assigned_to ? (
+                                  <div>
+                                    <span className="font-bold text-slate-900 block">{c.assigned_to}</span>
+                                    {c.staff_phone && <span className="text-[10px] text-slate-500 font-mono block">📞 {c.staff_phone}</span>}
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 italic text-[11px]">Unassigned</span>
+                                )}
                               </td>
                               <td className="py-3 px-4">
                                 <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -858,6 +897,16 @@ export default function HostelManagementPage() {
                           </div>
                           <p className="font-bold text-slate-800 text-xs">{c.title}</p>
                           <p className="text-slate-600 text-xs leading-relaxed">{c.description}</p>
+                          {c.assigned_to && (
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-600 font-medium">
+                              <span className="inline-flex items-center gap-1 bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md">
+                                <Wrench className="w-3 h-3 text-indigo-600" />
+                                <span>Assigned: <strong>{c.assigned_to}</strong></span>
+                              </span>
+                              {c.staff_phone && <span className="text-slate-500 font-mono">📞 {c.staff_phone}</span>}
+                              {c.staff_designation && <span className="text-slate-500">({c.staff_designation})</span>}
+                            </div>
+                          )}
                           {c.resolution_notes && (
                             <div className="mt-2 p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs">
                               <span className="font-bold">Staff Resolution:</span> {c.resolution_notes}
@@ -1385,6 +1434,97 @@ export default function HostelManagementPage() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ------------------------------------------------------------------ */}
+        {/* TAB 5: STAFF & WARDEN DIRECTORY                                    */}
+        {/* ------------------------------------------------------------------ */}
+        {token && activeTab === 'directory' && (
+          <div className="space-y-6">
+            <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                    <Users className="w-4 h-4 text-indigo-600" />
+                    <span>Campus Staff &amp; Warden Directory</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Verified residential wardens, campus maintenance technicians, and emergency support staff.
+                  </p>
+                </div>
+
+                {/* Role Filter Chips */}
+                <div className="flex flex-wrap gap-1.5">
+                  {['ALL', 'WARDEN', 'TECHNICIAN', 'HOUSEKEEPING', 'ADMIN'].map((r) => (
+                    <button
+                      key={r}
+                      onClick={() => setStaffFilterRole(r)}
+                      className={`px-3 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                        staffFilterRole === r
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                      }`}
+                    >
+                      {r === 'ALL' ? 'All Staff' : r}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Staff Cards Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {staffDirectory
+                  .filter((s) => {
+                    if (staffFilterRole === 'ALL') return true;
+                    if (staffFilterRole === 'ADMIN') return ['SYSTEM_ADMIN', 'SECURITY_GUARD', 'ACCOUNTANT', 'MESS_SUPERVISOR'].includes(s.role);
+                    return s.role === staffFilterRole;
+                  })
+                  .map((s) => (
+                    <div
+                      key={s.id}
+                      className="p-5 rounded-2xl border border-slate-200 bg-white hover:border-indigo-400 hover:shadow-md transition-all flex flex-col justify-between space-y-3"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-[10px] font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded">
+                            {s.employee_code}
+                          </span>
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            s.role === 'WARDEN' ? 'bg-purple-100 text-purple-800' :
+                            s.role === 'TECHNICIAN' ? 'bg-blue-100 text-blue-800' :
+                            s.role === 'HOUSEKEEPING' ? 'bg-amber-100 text-amber-800' :
+                            'bg-slate-100 text-slate-800'
+                          }`}>
+                            {s.trade_specialization || s.role}
+                          </span>
+                        </div>
+
+                        <div>
+                          <h4 className="font-bold text-slate-900 text-sm">{s.full_name}</h4>
+                          <p className="text-xs text-indigo-600 font-semibold">{s.designation}</p>
+                          {s.block_name && (
+                            <p className="text-[11px] text-slate-500 font-medium">Assigned to: {s.block_name}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="pt-3 border-t border-slate-100 space-y-1 text-xs text-slate-600">
+                        <div className="flex items-center justify-between font-mono text-[11px]">
+                          <span className="text-slate-400">Phone:</span>
+                          <span className="font-bold text-slate-800">{s.phone_number}</span>
+                        </div>
+                        {s.email && (
+                          <div className="flex items-center justify-between text-[11px] truncate">
+                            <span className="text-slate-400">Email:</span>
+                            <span className="text-slate-600 truncate ml-2">{s.email}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
           </div>
         )}
       </main>

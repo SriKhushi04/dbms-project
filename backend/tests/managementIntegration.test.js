@@ -1,20 +1,20 @@
 // ============================================================================
 // HOSTELHUB MANAGEMENT MODULE INTEGRATION TEST SUITE
 // Tests HTTP API endpoints, role guards, token lifecycle, and allocation immutability
+// Zero passwords - verifies demo registration-number and role-based access
 // ============================================================================
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createManagementRouter } from '../src/routes/managementRoutes.js';
 import { generateStudents, generateRooms, hostels } from '../../database/seeds/seedData.js';
-import bcrypt from 'bcryptjs';
+
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret_key_minimum_32_characters_for_hmac_sha256';
 
 // In-Memory Test Database matching MySQL schema
 function createInMemoryDb() {
   const students = generateStudents();
   const rooms = generateRooms();
-  const studentCredentials = new Map(); // student_id -> hash
-  const staffAccounts = new Map(); // id -> staff
   const maintenanceTickets = new Map();
   const feeInvoices = new Map();
   const feePayments = new Map();
@@ -24,7 +24,6 @@ function createInMemoryDb() {
   // Baseline allocation: Student 1 (24BCE1001) in Room 1 (S-101)
   const allocations = new Map([[1, 1]]);
 
-  let nextStaffId = 1;
   let nextTicketId = 1;
   let nextInvoiceId = 1;
   let nextPaymentId = 1;
@@ -36,40 +35,13 @@ function createInMemoryDb() {
     async query(sql, params = []) {
       const s = sql.trim().toUpperCase();
 
-      // 1. Staff queries
-      if (s.startsWith('SELECT COUNT(*) AS COUNT FROM MANAGEMENT_STAFF')) {
-        return [[{ count: staffAccounts.size }]];
-      }
-      if (s.startsWith('INSERT INTO MANAGEMENT_STAFF')) {
-        const [username, hash, name, role] = params;
-        const id = nextStaffId++;
-        const staff = { id, username, password_hash: hash, full_name: name, role };
-        staffAccounts.set(id, staff);
-        return [{ insertId: id }];
-      }
-      if (s.startsWith('SELECT ID, USERNAME, PASSWORD_HASH, FULL_NAME, ROLE FROM MANAGEMENT_STAFF WHERE USERNAME = ?')) {
-        const found = [...staffAccounts.values()].filter(st => st.username === params[0]);
-        return [found];
-      }
-
-      // 2. Student auth queries
-      if (s.includes('FROM STUDENTS S') && s.includes('LEFT JOIN STUDENT_CREDENTIALS SC')) {
-        const student = students.find(st => st.registration_number === params[0]);
-        if (!student) return [[]];
-        const hash = studentCredentials.get(student.id) || null;
-        return [[{ ...student, password_hash: hash }]];
-      }
-      if (s.startsWith('SELECT ID, REGISTRATION_NUMBER, FULL_NAME, MERIT_RANK, IS_ELIGIBLE FROM STUDENTS WHERE REGISTRATION_NUMBER = ?')) {
+      // 1. Student auth query (registration-number demo lookup)
+      if (s.includes('FROM STUDENTS S') && s.includes('WHERE S.REGISTRATION_NUMBER = ?')) {
         const found = students.filter(st => st.registration_number === params[0]);
         return [found];
       }
-      if (s.includes('INSERT INTO STUDENT_CREDENTIALS')) {
-        const [studentId, hash] = params;
-        studentCredentials.set(studentId, hash);
-        return [{ affectedRows: 1 }];
-      }
 
-      // 3. Allocations queries (READ-ONLY check for management)
+      // 2. Allocations queries (READ-ONLY check for management)
       if (s.includes('FROM ALLOCATIONS A') && s.includes('JOIN ROOMS R')) {
         const studentId = params[0];
         const roomId = allocations.get(studentId);
@@ -79,7 +51,7 @@ function createInMemoryDb() {
         return [[{ room_id: room.id, room_number: room.room_number, capacity: room.capacity, hostel_id: hostel.id, block_name: hostel.block_name }]];
       }
 
-      // 4. Maintenance queries
+      // 3. Maintenance queries
       if (s.startsWith('INSERT INTO MAINTENANCE_TICKETS')) {
         const [tNum, sId, rId, hId, cat, title, desc, prio] = params;
         const id = nextTicketId++;
@@ -96,18 +68,27 @@ function createInMemoryDb() {
         return t ? [[t]] : [[]];
       }
       if (s.startsWith('UPDATE MAINTENANCE_TICKETS')) {
-        const [status, assigned, notes, resolvedAt, id] = params;
+        const id = params[params.length - 1];
+        const status = params[0];
         const t = maintenanceTickets.get(id);
         if (t) {
           t.status = status;
-          if (assigned) t.assigned_to = assigned;
+          if (params[1]) t.assigned_to = params[1];
+          if (params.length === 6 && params[2]) t.assigned_staff_id = params[2];
+          const notes = params.length === 6 ? params[3] : params[2];
           if (notes) t.resolution_notes = notes;
-          t.resolved_at = resolvedAt;
+          t.resolved_at = params[params.length - 2];
         }
         return [{ affectedRows: 1 }];
       }
+      if (s.includes('FROM STAFF_MEMBERS')) {
+        return [[
+          { id: 1, employee_code: 'EMP-WRD-01', full_name: 'Dr. Suresh Kumar', designation: 'Chief Hostel Warden', role: 'WARDEN' },
+          { id: 5, employee_code: 'EMP-ELE-01', full_name: 'Manoj Sharma', designation: 'Senior Campus Electrician', role: 'TECHNICIAN' }
+        ]];
+      }
 
-      // 5. Fee queries
+      // 4. Fee queries
       if (s.startsWith('SELECT * FROM FEE_INVOICES WHERE STUDENT_ID = ?')) {
         const inv = feeInvoices.get(params[0]);
         return inv ? [[inv]] : [[]];
@@ -124,7 +105,7 @@ function createInMemoryDb() {
         return [list];
       }
 
-      // 6. Gate Pass queries
+      // 5. Gate Pass queries
       if (s.startsWith('SELECT ID FROM GATE_PASSES WHERE STUDENT_ID = ? AND STATUS IN')) {
         const active = [...gatePasses.values()].filter(g => g.student_id === params[0] && ['PENDING', 'APPROVED', 'CHECKED_OUT'].includes(g.status));
         return [active];
@@ -211,49 +192,38 @@ test('HostelHub Management Module HTTP Integration & Invariants', async (t) => {
   let wardenToken = null;
   let studentToken = null;
 
-  // Test 1: First-time staff setup
-  await t.test('1. First-time staff setup succeeds and issues warden token', async () => {
-    const res = await dispatch('POST', '/auth/setup-first-staff', {
-      username: 'chief_warden',
-      password: 'WardenSecurePassword2026',
-      full_name: 'Dr. Suresh Kumar',
+  // Test 1: Staff demo session activation
+  await t.test('1. Staff demo session activation succeeds and issues role token (no passwords)', async () => {
+    const res = await dispatch('POST', '/auth/staff-login', {
       role: 'WARDEN'
     });
 
-    assert.equal(res.status, 201);
+    assert.equal(res.status, 200);
     assert.equal(res.data.success, true);
-    assert.equal(res.data.data.staff.username, 'chief_warden');
     assert.equal(res.data.data.staff.role, 'WARDEN');
     assert.ok(res.data.data.token);
     wardenToken = res.data.data.token;
   });
 
-  // Test 2: Second call to first-time setup is blocked (403)
-  await t.test('2. Subsequent calls to first-time staff setup are strictly blocked', async () => {
-    const res = await dispatch('POST', '/auth/setup-first-staff', {
-      username: 'imposter_warden',
-      password: 'AnotherPassword123',
-      full_name: 'Imposter',
-      role: 'WARDEN'
+  // Test 2: Multiple staff demo roles exist and possess distinct role tokens
+  await t.test('2. Multiple staff demo roles exist and possess distinct role tokens', async () => {
+    const secRes = await dispatch('POST', '/auth/staff-login', {
+      role: 'SECURITY_GUARD'
     });
+    assert.equal(secRes.status, 200);
+    assert.equal(secRes.data.data.staff.role, 'SECURITY_GUARD');
 
-    assert.equal(res.status, 403);
-    assert.equal(res.data.success, false);
+    const accRes = await dispatch('POST', '/auth/staff-login', {
+      role: 'ACCOUNTANT'
+    });
+    assert.equal(accRes.status, 200);
+    assert.equal(accRes.data.data.staff.role, 'ACCOUNTANT');
   });
 
-  // Test 3: Student registers password and logs in
-  await t.test('3. Student registers management password and authenticates', async () => {
-    const regRes = await dispatch('POST', '/auth/student-register', {
-      registration_number: '24BCE1001',
-      password: 'StudentStrongPassword2026'
-    });
-
-    assert.equal(regRes.status, 201);
-    assert.equal(regRes.data.success, true);
-
+  // Test 3: Student logs in using registration number only (zero password)
+  await t.test('3. Student authenticates using registration number only without password', async () => {
     const loginRes = await dispatch('POST', '/auth/student-login', {
-      registration_number: '24BCE1001',
-      password: 'StudentStrongPassword2026'
+      registration_number: '24BCE1001'
     });
 
     assert.equal(loginRes.status, 200);

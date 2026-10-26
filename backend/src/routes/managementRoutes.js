@@ -62,6 +62,11 @@ export function createManagementRouter(pool) {
     requireRole('WARDEN'),
     (req, res) => ctrl.getComplaintStats(req, res)
   );
+  router.get(
+    '/staff',
+    verifyManagementToken,
+    (req, res) => ctrl.getAllStaff(req, res)
+  );
 
   // --------------------------------------------------------------------------
   // 3. Feature 2: Fees & Billing Management

@@ -1,285 +1,127 @@
 // ============================================================================
 // HOSTELHUB MANAGEMENT MODULE CONTROLLER
 // Complete business logic for Maintenance, Fees, Mess, and Curfew/Gate Pass
+// Demo Mode: Uses registration numbers and demo staff roles. Zero passwords.
 // ============================================================================
 
-import bcrypt from 'bcryptjs';
 import { generateToken } from '../middleware/managementAuth.js';
 
 // Helper to sanitize string inputs
 const cleanStr = (val) => (typeof val === 'string' ? val.trim() : '');
 
+const DEMO_STAFF_ROLES = {
+  WARDEN: {
+    username: 'warden_demo',
+    full_name: 'Dr. Suresh Kumar (Chief Warden)',
+    role: 'WARDEN'
+  },
+  ACCOUNTANT: {
+    username: 'accountant_demo',
+    full_name: 'Mr. Rajiv Mehta (Senior Accountant)',
+    role: 'ACCOUNTANT'
+  },
+  MESS_SUPERVISOR: {
+    username: 'mess_supervisor_demo',
+    full_name: 'Mr. Anand Sharma (Mess In-Charge)',
+    role: 'MESS_SUPERVISOR'
+  },
+  SECURITY_GUARD: {
+    username: 'security_demo',
+    full_name: 'Officer Balram Singh (Main Gate Security)',
+    role: 'SECURITY_GUARD'
+  }
+};
+
 export function createManagementController(pool) {
   return {
     // ========================================================================
-    // 1. SECURE AUTHENTICATION & STAFF SETUP
+    // 1. DEMO AUTHENTICATION & SESSION MANAGEMENT (NO PASSWORDS)
     // ========================================================================
 
     /**
-     * Safe first-time staff account setup.
-     * Only permitted if zero staff accounts exist.
-     */
-    async setupFirstStaff(req, res) {
-      try {
-        const [rows] = await pool.query('SELECT COUNT(*) AS count FROM management_staff');
-        if (rows[0].count > 0) {
-          return res.status(403).json({
-            success: false,
-            message: 'First-time staff setup is already complete. Please log in with existing staff credentials.'
-          });
-        }
-
-        // Security Guard: Check setup key if configured in environment
-        const expectedKey = process.env.INITIAL_STAFF_SETUP_KEY;
-        const providedKey = req.body.setup_key || req.headers['x-setup-key'];
-        if (expectedKey && providedKey !== expectedKey) {
-          return res.status(401).json({
-            success: false,
-            message: 'Unauthorized: Invalid or missing initial staff setup key (x-setup-key).'
-          });
-        }
-
-        const { username, password, full_name, role = 'WARDEN' } = req.body;
-        const cleanUser = cleanStr(username);
-        const cleanPass = cleanStr(password);
-        const cleanName = cleanStr(full_name);
-
-        if (!cleanUser || cleanUser.length < 3) {
-          return res.status(400).json({ success: false, message: 'Username must be at least 3 characters.' });
-        }
-        if (!cleanPass || cleanPass.length < 8) {
-          return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
-        }
-        if (!cleanName || cleanName.length < 2) {
-          return res.status(400).json({ success: false, message: 'Full name is required.' });
-        }
-
-        const allowedRoles = ['WARDEN', 'ACCOUNTANT', 'MESS_SUPERVISOR', 'SECURITY_GUARD'];
-        if (!allowedRoles.includes(role)) {
-          return res.status(400).json({ success: false, message: 'Invalid staff role specified.' });
-        }
-
-        const hash = await bcrypt.hash(cleanPass, 10);
-        const [result] = await pool.query(
-          'INSERT INTO management_staff (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)',
-          [cleanUser, hash, cleanName, role]
-        );
-
-        const token = generateToken({
-          sub: result.insertId,
-          username: cleanUser,
-          role,
-          full_name: cleanName
-        });
-
-        res.status(201).json({
-          success: true,
-          message: 'Initial staff administrator account setup complete.',
-          data: {
-            token,
-            staff: { id: result.insertId, username: cleanUser, full_name: cleanName, role }
-          }
-        });
-      } catch (err) {
-        res.status(500).json({ success: false, message: 'Setup error: ' + err.message });
-      }
-    },
-
-    /**
-     * Authenticate staff (Warden, Accountant, Mess Supervisor, Security)
+     * Authenticate staff in Local Demo Mode by role.
+     * No password required. Clearly marked demo identity.
      */
     async staffLogin(req, res) {
       try {
-        const { username, password } = req.body;
-        const cleanUser = cleanStr(username);
-        const cleanPass = cleanStr(password);
+        const { role = 'WARDEN', username } = req.body || {};
+        const targetRole = (role || 'WARDEN').toUpperCase();
 
-        if (!cleanUser || !cleanPass) {
-          return res.status(400).json({ success: false, message: 'Username and password are required.' });
+        if (!DEMO_STAFF_ROLES[targetRole]) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid staff role. Must be one of: ' + Object.keys(DEMO_STAFF_ROLES).join(', ')
+          });
         }
 
-        const [rows] = await pool.query(
-          'SELECT id, username, password_hash, full_name, role FROM management_staff WHERE username = ?',
-          [cleanUser]
-        );
-
-        if (rows.length === 0) {
-          return res.status(401).json({ success: false, message: 'Invalid username or password.' });
-        }
-
-        const staff = rows[0];
-        const match = await bcrypt.compare(cleanPass, staff.password_hash);
-        if (!match) {
-          return res.status(401).json({ success: false, message: 'Invalid username or password.' });
-        }
+        const staffConfig = DEMO_STAFF_ROLES[targetRole];
+        const staffName = username ? `${cleanStr(username)} (${targetRole})` : staffConfig.full_name;
+        const roleIndex = Object.keys(DEMO_STAFF_ROLES).indexOf(targetRole);
 
         const token = generateToken({
-          sub: staff.id,
-          username: staff.username,
-          role: staff.role,
-          full_name: staff.full_name
+          sub: 900 + roleIndex,
+          username: cleanStr(username) || staffConfig.username,
+          role: targetRole,
+          full_name: staffName,
+          isDemo: true
         });
 
         res.json({
           success: true,
-          message: 'Staff authenticated successfully.',
+          message: 'Demo staff mode activated as ' + targetRole + '.',
           data: {
             token,
-            staff: { id: staff.id, username: staff.username, full_name: staff.full_name, role: staff.role }
-          }
-        });
-      } catch (err) {
-        res.status(500).json({ success: false, message: 'Login error: ' + err.message });
-      }
-    },
-
-    /**
-     * Create additional staff accounts (Warden-only)
-     */
-    async createStaffAccount(req, res) {
-      try {
-        const { username, password, full_name, role } = req.body;
-        const cleanUser = cleanStr(username);
-        const cleanPass = cleanStr(password);
-        const cleanName = cleanStr(full_name);
-
-        if (!cleanUser || cleanUser.length < 3) {
-          return res.status(400).json({ success: false, message: 'Username must be at least 3 characters.' });
-        }
-        if (!cleanPass || cleanPass.length < 8) {
-          return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
-        }
-        if (!cleanName || cleanName.length < 2) {
-          return res.status(400).json({ success: false, message: 'Full name is required.' });
-        }
-
-        const allowedRoles = ['WARDEN', 'ACCOUNTANT', 'MESS_SUPERVISOR', 'SECURITY_GUARD'];
-        if (!allowedRoles.includes(role)) {
-          return res.status(400).json({ success: false, message: 'Invalid staff role specified.' });
-        }
-
-        const hash = await bcrypt.hash(cleanPass, 10);
-        const [result] = await pool.query(
-          'INSERT INTO management_staff (username, password_hash, full_name, role) VALUES (?, ?, ?, ?)',
-          [cleanUser, hash, cleanName, role]
-        );
-
-        res.status(201).json({
-          success: true,
-          message: `Staff account (${role}) created successfully.`,
-          data: { id: result.insertId, username: cleanUser, full_name: cleanName, role }
-        });
-      } catch (err) {
-        if (err.code === 'ER_DUP_ENTRY') {
-          return res.status(400).json({ success: false, message: 'Username is already in use.' });
-        }
-        res.status(500).json({ success: false, message: 'Failed to create staff account: ' + err.message });
-      }
-    },
-
-    /**
-     * Student registers or sets their Management password
-     */
-    async studentRegister(req, res) {
-      try {
-        const { registration_number, password } = req.body;
-        const cleanReg = cleanStr(registration_number).toUpperCase();
-        const cleanPass = cleanStr(password);
-
-        if (!cleanReg || !cleanPass) {
-          return res.status(400).json({ success: false, message: 'Registration number and password are required.' });
-        }
-        if (cleanPass.length < 8) {
-          return res.status(400).json({ success: false, message: 'Password must be at least 8 characters long.' });
-        }
-
-        // Verify student exists in students table
-        const [students] = await pool.query(
-          'SELECT id, registration_number, full_name, merit_rank, is_eligible FROM students WHERE registration_number = ?',
-          [cleanReg]
-        );
-
-        if (students.length === 0) {
-          return res.status(404).json({ success: false, message: 'Registration number not found in university records.' });
-        }
-
-        const student = students[0];
-        if (!student.is_eligible) {
-          return res.status(403).json({ success: false, message: 'Student is not currently eligible for hostel services.' });
-        }
-
-        const hash = await bcrypt.hash(cleanPass, 10);
-
-        // Store in student_credentials
-        await pool.query(
-          'INSERT INTO student_credentials (student_id, password_hash) VALUES (?, ?) ON DUPLICATE KEY UPDATE password_hash = ?',
-          [student.id, hash, hash]
-        );
-
-        const token = generateToken({
-          sub: student.id,
-          registration_number: student.registration_number,
-          role: 'STUDENT'
-        });
-
-        res.status(201).json({
-          success: true,
-          message: 'Student management password registered successfully.',
-          data: {
-            token,
-            student: {
-              id: student.id,
-              registration_number: student.registration_number,
-              full_name: student.full_name,
-              merit_rank: student.merit_rank
+            staff: {
+              id: 900 + roleIndex,
+              username: cleanStr(username) || staffConfig.username,
+              full_name: staffName,
+              role: targetRole
             }
           }
         });
       } catch (err) {
-        res.status(500).json({ success: false, message: 'Registration error: ' + err.message });
+        res.status(500).json({ success: false, message: 'Staff login error: ' + err.message });
       }
     },
 
     /**
-     * Student logs in to Management
+     * First-time setup / create staff: In demo mode, simply routes to staff login
+     */
+    async setupFirstStaff(req, res) {
+      return this.staffLogin(req, res);
+    },
+
+    async createStaffAccount(req, res) {
+      return this.staffLogin(req, res);
+    },
+
+    /**
+     * Student session login using registration number only.
+     * Verifies existence and eligibility from MySQL students table.
+     * Zero password required.
      */
     async studentLogin(req, res) {
       try {
-        const { registration_number, password } = req.body;
+        const { registration_number } = req.body || {};
         const cleanReg = cleanStr(registration_number).toUpperCase();
-        const cleanPass = cleanStr(password);
 
-        if (!cleanReg || !cleanPass) {
-          return res.status(400).json({ success: false, message: 'Registration number and password are required.' });
+        if (!cleanReg) {
+          return res.status(400).json({ success: false, message: 'Registration number is required.' });
         }
 
         const [rows] = await pool.query(`
-          SELECT s.id, s.registration_number, s.full_name, s.merit_rank, s.is_eligible, sc.password_hash
+          SELECT s.id, s.registration_number, s.full_name, s.merit_rank, s.is_eligible
           FROM students s
-          LEFT JOIN student_credentials sc ON s.id = sc.student_id
           WHERE s.registration_number = ?
         `, [cleanReg]);
 
         if (rows.length === 0) {
-          return res.status(401).json({ success: false, message: 'Invalid credentials or student record not found.' });
+          return res.status(404).json({ success: false, message: `Student registration number "${cleanReg}" not found in university records.` });
         }
 
         const student = rows[0];
         if (!student.is_eligible) {
-          return res.status(403).json({ success: false, message: 'Student is not eligible for hostel management services.' });
-        }
-
-        if (!student.password_hash) {
-          return res.status(400).json({
-            success: false,
-            needsRegistration: true,
-            message: 'First-time setup required. Please register your management password.'
-          });
-        }
-
-        const match = await bcrypt.compare(cleanPass, student.password_hash);
-        if (!match) {
-          return res.status(401).json({ success: false, message: 'Invalid registration number or password.' });
+          return res.status(403).json({ success: false, message: 'Student is not currently eligible for hostel management services.' });
         }
 
         // Check allocated room (Read-only query to Phase 1 allocations)
@@ -296,12 +138,13 @@ export function createManagementController(pool) {
         const token = generateToken({
           sub: student.id,
           registration_number: student.registration_number,
+          full_name: student.full_name,
           role: 'STUDENT'
         });
 
         res.json({
           success: true,
-          message: 'Student authenticated successfully.',
+          message: 'Student session verified successfully.',
           data: {
             token,
             student: {
@@ -314,8 +157,15 @@ export function createManagementController(pool) {
           }
         });
       } catch (err) {
-        res.status(500).json({ success: false, message: 'Login error: ' + err.message });
+        res.status(500).json({ success: false, message: 'Student login error: ' + err.message });
       }
+    },
+
+    /**
+     * studentRegister alias for registration-number demo
+     */
+    async studentRegister(req, res) {
+      return this.studentLogin(req, res);
     },
 
     // ========================================================================
@@ -414,11 +264,16 @@ export function createManagementController(pool) {
         const [rows] = await pool.query(`
           SELECT 
             t.id, t.ticket_number, t.category, t.title, t.description, t.priority, t.status,
-            t.assigned_to, t.resolution_notes, t.created_at, t.resolved_at,
+            COALESCE(st.full_name, t.assigned_to) AS assigned_to,
+            t.assigned_staff_id,
+            st.designation AS staff_designation,
+            st.phone_number AS staff_phone,
+            t.resolution_notes, t.created_at, t.resolved_at,
             r.room_number, h.block_name
           FROM maintenance_tickets t
           LEFT JOIN rooms r ON t.room_id = r.id
           LEFT JOIN hostels h ON t.hostel_id = h.id
+          LEFT JOIN staff_members st ON t.assigned_staff_id = st.id
           WHERE t.student_id = ?
           ORDER BY t.created_at DESC
         `, [studentId]);
@@ -438,13 +293,18 @@ export function createManagementController(pool) {
         let query = `
           SELECT 
             t.id, t.ticket_number, t.category, t.title, t.description, t.priority, t.status,
-            t.assigned_to, t.resolution_notes, t.created_at, t.resolved_at,
+            COALESCE(st.full_name, t.assigned_to) AS assigned_to,
+            t.assigned_staff_id,
+            st.designation AS staff_designation,
+            st.phone_number AS staff_phone,
+            t.resolution_notes, t.created_at, t.resolved_at,
             s.registration_number, s.full_name AS student_name,
             r.room_number, h.block_name
           FROM maintenance_tickets t
           JOIN students s ON t.student_id = s.id
           LEFT JOIN rooms r ON t.room_id = r.id
           LEFT JOIN hostels h ON t.hostel_id = h.id
+          LEFT JOIN staff_members st ON t.assigned_staff_id = st.id
           WHERE 1=1
         `;
         const params = [];
@@ -481,7 +341,7 @@ export function createManagementController(pool) {
     async updateComplaintStatus(req, res) {
       try {
         const ticketId = parseInt(req.params.id, 10);
-        const { status, assigned_to, resolution_notes } = req.body;
+        const { status, assigned_to, assigned_staff_id, resolution_notes } = req.body;
 
         const [tickets] = await pool.query(
           'SELECT id, status FROM maintenance_tickets WHERE id = ?',
@@ -515,20 +375,85 @@ export function createManagementController(pool) {
           });
         }
 
+        let resolvedStaffId = assigned_staff_id ? parseInt(assigned_staff_id, 10) : null;
+        let resolvedStaffName = cleanStr(assigned_to);
+
+        if (resolvedStaffId) {
+          try {
+            const [staffRows] = await pool.query('SELECT id, full_name FROM staff_members WHERE id = ?', [resolvedStaffId]);
+            if (staffRows && staffRows.length > 0) {
+              resolvedStaffName = staffRows[0].full_name;
+            }
+          } catch (e) {
+            // in case mock pool without staff_members in tests
+          }
+        }
+
         const resolvedAt = status === 'RESOLVED' ? new Date() : null;
-        await pool.query(`
-          UPDATE maintenance_tickets
-          SET status = ?, assigned_to = COALESCE(?, assigned_to), resolution_notes = COALESCE(?, resolution_notes), resolved_at = ?
-          WHERE id = ?
-        `, [status, cleanStr(assigned_to) || null, cleanNotes || null, resolvedAt, ticketId]);
+        if (assigned_staff_id !== undefined) {
+          await pool.query(`
+            UPDATE maintenance_tickets
+            SET status = ?, 
+                assigned_to = COALESCE(?, assigned_to), 
+                assigned_staff_id = COALESCE(?, assigned_staff_id),
+                resolution_notes = COALESCE(?, resolution_notes), 
+                resolved_at = ?
+            WHERE id = ?
+          `, [status, resolvedStaffName || null, resolvedStaffId || null, cleanNotes || null, resolvedAt, ticketId]);
+        } else {
+          await pool.query(`
+            UPDATE maintenance_tickets
+            SET status = ?, 
+                assigned_to = COALESCE(?, assigned_to), 
+                resolution_notes = COALESCE(?, resolution_notes), 
+                resolved_at = ?
+            WHERE id = ?
+          `, [status, resolvedStaffName || null, cleanNotes || null, resolvedAt, ticketId]);
+        }
 
         res.json({
           success: true,
           message: `Ticket #${ticketId} updated to ${status}.`,
-          data: { id: ticketId, status, assigned_to, resolution_notes: cleanNotes }
+          data: { id: ticketId, status, assigned_to: resolvedStaffName, assigned_staff_id: resolvedStaffId, resolution_notes: cleanNotes }
         });
       } catch (err) {
         res.status(500).json({ success: false, message: 'Failed to update ticket: ' + err.message });
+      }
+    },
+
+    /**
+     * Get all active staff members / technicians (Staff Directory)
+     */
+    async getAllStaff(req, res) {
+      try {
+        const { role, trade, hostel_id } = req.query;
+        let query = `
+          SELECT 
+            s.id, s.employee_code, s.full_name, s.designation, s.role,
+            s.trade_specialization, s.phone_number, s.email, s.assigned_hostel_id,
+            s.is_active, h.block_name
+          FROM staff_members s
+          LEFT JOIN hostels h ON s.assigned_hostel_id = h.id
+          WHERE s.is_active = TRUE
+        `;
+        const params = [];
+        if (role) {
+          query += ' AND s.role = ?';
+          params.push(role);
+        }
+        if (trade) {
+          query += ' AND s.trade_specialization = ?';
+          params.push(trade);
+        }
+        if (hostel_id) {
+          query += ' AND (s.assigned_hostel_id = ? OR s.assigned_hostel_id IS NULL)';
+          params.push(hostel_id);
+        }
+        query += ' ORDER BY s.role ASC, s.full_name ASC';
+        const [rows] = await pool.query(query, params);
+        res.json({ success: true, count: rows.length, data: rows });
+      } catch (err) {
+        res.status(500).json({ success: false, message: 'Failed to fetch staff members: ' + err.message });
       }
     },
 

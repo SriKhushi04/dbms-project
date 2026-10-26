@@ -2,31 +2,34 @@
 // HOSTELHUB MANAGEMENT MODULE VALIDATION & UNIT TEST SUITE
 // Tests business rules, state machines, input validation, and RBAC
 // Node.js Built-in Test Runner (node:test + node:assert/strict)
+// Zero passwords - verifies demo registration-number and role-based access
 // ============================================================================
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
 const TEST_SECRET = 'test_jwt_secret_key_minimum_32_characters_for_hmac_sha256';
 
 test('HostelHub Management Module Validation & Invariants', async (t) => {
   // --------------------------------------------------------------------------
-  // 1. Password Verification & Secure Hashing
+  // 1. Password-Free Demo Authentication Invariant
   // --------------------------------------------------------------------------
-  await t.test('1. Passwords are securely hashed with bcrypt and verified', async () => {
-    const rawPassword = 'SecretWardenPassword123';
-    const hash = await bcrypt.hash(rawPassword, 10);
+  await t.test('1. Registration-number demo identity invariant: Zero passwords required', () => {
+    const studentLoginHandler = (regNo) => {
+      // Invariant: Student login strictly requires registration number, zero password
+      if (!regNo || typeof regNo !== 'string' || !regNo.trim()) {
+        return { success: false, reason: 'Registration number is required' };
+      }
+      return { success: true, studentId: 1, registration_number: regNo.trim().toUpperCase(), role: 'STUDENT' };
+    };
 
-    assert.notEqual(rawPassword, hash, 'Password must never be stored as plaintext');
-    assert.ok(hash.startsWith('$2'), 'Must use bcrypt salt format');
-
-    const isValid = await bcrypt.compare(rawPassword, hash);
-    assert.equal(isValid, true, 'Valid password must match hash');
-
-    const isInvalid = await bcrypt.compare('WrongPassword456', hash);
-    assert.equal(isInvalid, false, 'Invalid password must be rejected');
+    assert.equal(studentLoginHandler('').success, false);
+    assert.equal(studentLoginHandler('   ').success, false);
+    const auth = studentLoginHandler('24BCE1001');
+    assert.equal(auth.success, true);
+    assert.equal(auth.registration_number, '24BCE1001');
+    assert.equal(auth.role, 'STUDENT');
   });
 
   // --------------------------------------------------------------------------
@@ -212,7 +215,7 @@ test('HostelHub Management Module Validation & Invariants', async (t) => {
   await t.test('8. Strict Role-Based Access Control (RBAC) matrix', () => {
     const rolePermissions = {
       STUDENT: ['SUBMIT_COMPLAINT', 'VIEW_MY_COMPLAINT', 'PAY_FEE', 'VIEW_MY_LEDGER', 'APPLY_REBATE', 'REQUEST_GATE_PASS'],
-      WARDEN: ['ASSIGN_COMPLAINT', 'RESOLVE_COMPLAINT', 'VIEW_ALL_COMPLAINTS', 'VIEW_LEDGER', 'APPROVE_REBATE', 'APPROVE_GATE_PASS', 'CREATE_STAFF'],
+      WARDEN: ['ASSIGN_COMPLAINT', 'RESOLVE_COMPLAINT', 'VIEW_ALL_COMPLAINTS', 'VIEW_LEDGER', 'APPROVE_REBATE', 'APPROVE_GATE_PASS'],
       ACCOUNTANT: ['VIEW_LEDGER', 'RECORD_PAYMENT', 'ISSUE_CLEARANCE'],
       MESS_SUPERVISOR: ['UPDATE_MENU', 'APPROVE_REBATE', 'VIEW_HEADCOUNT'],
       SECURITY_GUARD: ['LOG_CHECKOUT', 'LOG_CHECKIN', 'VIEW_OVERDUE_GATE_PASSES']

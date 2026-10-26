@@ -83,31 +83,13 @@ CREATE TABLE IF NOT EXISTS allocations (
 
 
 -- ============================================================================
--- 8-16. HOSTEL MANAGEMENT MODULE TABLES
+-- 8-14. HOSTEL MANAGEMENT MODULE TABLES
 -- Additive tables for facility maintenance, fees, mess, and curfew
+-- Demo authentication: Registration numbers & role-based demo staff
+-- Zero password or credential tables
 -- ============================================================================
 
--- 8. Staff Accounts (Role-based access: Warden, Accountant, Mess Supervisor, Security)
-CREATE TABLE IF NOT EXISTS management_staff (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(50) NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
-    full_name VARCHAR(100) NOT NULL,
-    role ENUM('WARDEN', 'ACCOUNTANT', 'MESS_SUPERVISOR', 'SECURITY_GUARD') NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_staff_username (username),
-    INDEX idx_staff_role (role)
-) ENGINE=InnoDB;
-
--- 9. Student Management Credentials
-CREATE TABLE IF NOT EXISTS student_credentials (
-    student_id INT PRIMARY KEY,
-    password_hash VARCHAR(255) NOT NULL,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
-) ENGINE=InnoDB;
-
--- 10. Maintenance & Complaints Tickets
+-- 8. Maintenance & Complaints Tickets
 CREATE TABLE IF NOT EXISTS maintenance_tickets (
     id INT AUTO_INCREMENT PRIMARY KEY,
     ticket_number VARCHAR(30) NOT NULL UNIQUE,
@@ -132,7 +114,7 @@ CREATE TABLE IF NOT EXISTS maintenance_tickets (
     INDEX idx_maint_category (category)
 ) ENGINE=InnoDB;
 
--- 11. Fee Invoices (Student semester bills)
+-- 9. Fee Invoices (Student semester bills)
 CREATE TABLE IF NOT EXISTS fee_invoices (
     id INT AUTO_INCREMENT PRIMARY KEY,
     student_id INT NOT NULL UNIQUE,
@@ -152,7 +134,7 @@ CREATE TABLE IF NOT EXISTS fee_invoices (
     INDEX idx_invoice_status (status)
 ) ENGINE=InnoDB;
 
--- 12. Fee Payments (Transactions ledger)
+-- 10. Fee Payments (Transactions ledger)
 CREATE TABLE IF NOT EXISTS fee_payments (
     id INT AUTO_INCREMENT PRIMARY KEY,
     invoice_id INT NOT NULL,
@@ -168,7 +150,7 @@ CREATE TABLE IF NOT EXISTS fee_payments (
     INDEX idx_payment_student (student_id)
 ) ENGINE=InnoDB;
 
--- 13. Mess Weekly Menu
+-- 11. Mess Weekly Menu
 CREATE TABLE IF NOT EXISTS mess_menu (
     id INT AUTO_INCREMENT PRIMARY KEY,
     day_of_week ENUM('MONDAY', 'TUESDAY', 'WEDNESDAY', 'THURSDAY', 'FRIDAY', 'SATURDAY', 'SUNDAY') NOT NULL UNIQUE,
@@ -180,7 +162,7 @@ CREATE TABLE IF NOT EXISTS mess_menu (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
--- 14. Student Dietary Preferences
+-- 12. Student Dietary Preferences
 CREATE TABLE IF NOT EXISTS student_dietary_preferences (
     student_id INT PRIMARY KEY,
     diet_type ENUM('VEGETARIAN', 'NON_VEGETARIAN', 'JAIN') DEFAULT 'VEGETARIAN',
@@ -188,7 +170,7 @@ CREATE TABLE IF NOT EXISTS student_dietary_preferences (
     FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
--- 15. Mess Leave Rebates
+-- 13. Mess Leave Rebates
 CREATE TABLE IF NOT EXISTS mess_rebates (
     id INT AUTO_INCREMENT PRIMARY KEY,
     student_id INT NOT NULL,
@@ -207,7 +189,7 @@ CREATE TABLE IF NOT EXISTS mess_rebates (
     INDEX idx_rebate_status (status)
 ) ENGINE=InnoDB;
 
--- 16. Curfew & Gate Passes
+-- 14. Curfew & Gate Passes
 CREATE TABLE IF NOT EXISTS gate_passes (
     id INT AUTO_INCREMENT PRIMARY KEY,
     pass_number VARCHAR(30) NOT NULL UNIQUE,
